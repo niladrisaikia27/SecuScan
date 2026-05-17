@@ -107,6 +107,7 @@ class ReportGenerator:
             metadata = {}
 
         normalized = {
+            "id": cls._clean_text(finding.get("id")),
             "title": cls._clean_text(finding.get("title")) or "Untitled finding",
             "category": cls._clean_text(finding.get("category")) or "General",
             "severity": cls._clean_text(finding.get("severity") or "info").upper(),
@@ -115,6 +116,7 @@ class ReportGenerator:
             "remediation": cls._clean_text(finding.get("remediation")),
             "proof": cls._clean_text(finding.get("proof")),
             "cve": cls._clean_text(finding.get("cve")),
+            "cwe": cls._clean_text(finding.get("cwe")),
             "cvss": finding.get("cvss"),
             "discovered_at": cls._clean_text(finding.get("discovered_at")),
             "metadata": {cls._clean_text(key): cls._clean_text(val) for key, val in metadata.items()},
@@ -993,7 +995,38 @@ class ReportGenerator:
         results = []
 
         for finding in payload["findings"]:
-            rule_id = finding.get("category", "General").replace(" ", "-").lower()
+            # Derive a stable, deterministic rule ID from finding-specific identifiers
+            raw_rule_id = None
+            
+            # 1. Check CVE
+            cve = finding.get("cve")
+            if cve and isinstance(cve, str) and cve.strip():
+                raw_rule_id = cve.strip()
+            
+            # 2. Check CWE (direct or in metadata)
+            if not raw_rule_id:
+                cwe = finding.get("cwe") or finding.get("metadata", {}).get("cwe")
+                if cwe and isinstance(cwe, str) and cwe.strip():
+                    raw_rule_id = cwe.strip()
+            
+            # 3. Check specific check/plugin/finding identifiers
+            if not raw_rule_id:
+                for key in ["check_id", "plugin_rule_id", "rule_id", "id"]:
+                    val = finding.get(key) or finding.get("metadata", {}).get(key)
+                    if val and isinstance(val, str) and val.strip():
+                        raw_rule_id = val.strip()
+                        break
+            
+            # 4. Fallback to sanitized title
+            if not raw_rule_id:
+                raw_rule_id = finding.get("title") or "security-finding"
+            
+            # Sanitize raw rule ID (lowercase, replace non-alphanumeric with hyphens)
+            rule_id = re.sub(r"[^a-zA-Z0-9\-]", "-", raw_rule_id).lower()
+            rule_id = re.sub(r"-+", "-", rule_id).strip("-")
+            if not rule_id:
+                rule_id = "security-finding"
+
             if rule_id not in rule_indices:
                 rule_indices[rule_id] = len(rules)
                 rules.append({
@@ -1027,6 +1060,8 @@ class ReportGenerator:
             target = finding.get("target") or payload["target"]
             # Check if target looks like a file path or URI
             if target:
+                is_url = "://" in target or target.startswith(("http://", "https://"))
+                
                 location = {
                     "physicalLocation": {
                         "artifactLocation": {
@@ -1035,8 +1070,8 @@ class ReportGenerator:
                     }
                 }
 
-                # If target has a line number like file.py:123
-                if ":" in target:
+                # If target has a line number like file.py:123 and is NOT a web URL
+                if not is_url and ":" in target:
                     parts = target.split(":")
                     if parts[-1].isdigit():
                         location["physicalLocation"]["artifactLocation"]["uri"] = ":".join(parts[:-1])

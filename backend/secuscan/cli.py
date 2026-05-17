@@ -21,7 +21,7 @@ from backend.secuscan.config import settings
 from backend.secuscan.plugins import init_plugins, get_plugin_manager
 from backend.secuscan.reporting import reporting
 
-async def run_scan(target: str, plugin_id: str, format: str, output_file: Optional[str] = None):
+async def run_scan(target: str, plugin_id: str, output_format: str, output_file: Optional[str] = None):
     """Initialize components and execute a scan task."""
 
     # Ensure directories exist
@@ -67,13 +67,19 @@ async def run_scan(target: str, plugin_id: str, format: str, output_file: Option
     execution_task = asyncio.create_task(executor.execute_task(task_id))
 
     async def monitor_output():
-        while True:
-            event = await queue.get()
-            if event["type"] == "output":
-                print(event["data"], end="", flush=True)
-            elif event["type"] == "status":
-                if event["data"] in ["completed", "failed", "cancelled"]:
-                    break
+        try:
+            while not execution_task.done():
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=0.2)
+                    if event["type"] == "output":
+                        print(event["data"], end="", flush=True)
+                    elif event["type"] == "status":
+                        if event["data"] in ["completed", "failed", "cancelled"]:
+                            break
+                except asyncio.TimeoutError:
+                    pass
+        except asyncio.CancelledError:
+            pass
 
     await monitor_output()
     await execution_task
@@ -100,13 +106,13 @@ async def run_scan(target: str, plugin_id: str, format: str, output_file: Option
     result_payload = {"structured": structured_data}
 
     report_content: str = ""
-    if format == "sarif":
+    if output_format == "sarif":
         report_content = reporting.generate_sarif_report(dict(task_row), result_payload)
-    elif format == "json":
+    elif output_format == "json":
         report_content = json.dumps(structured_data, indent=2)
-    elif format == "csv":
+    elif output_format == "csv":
         report_content = reporting.generate_csv_report(dict(task_row), result_payload)
-    elif format == "html":
+    elif output_format == "html":
         report_content = reporting.generate_html_report(dict(task_row), result_payload)
     else:
         # Console summary
